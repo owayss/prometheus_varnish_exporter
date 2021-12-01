@@ -202,6 +202,17 @@ var (
 	regexBackendUUID = regexp.MustCompile(`([[0-9A-Za-z]{8}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[89ABab][0-9A-Za-z]{3}-[0-9A-Za-z]{12})(.*)`)
 	// <name>(<ip>,(<something>),<port>)
 	regexBackendParen = regexp.MustCompile(`(.*)\((.*)\)`)
+	// https://docs.varnish-software.com/varnish-cache-plus/vmods/goto/#counters-and-backend-names
+	// E.g.:
+	// $VCL.goto.$SERIAL.($IP).($SCHEME://$DOMAIN:$PORT).(ttl:$TTL)
+	regexBackendGOTO = regexp.MustCompile(
+		strings.Join([]string{
+			`[a-z0-9_]+\.goto`,              // $VCL.goto
+			`\.(?P<serial>.*)`,              // ($SERIAL)
+			`\.\((?P<ip>[a-z0-9\-._~%]+)\)`, // ($IP)
+			`\.\((?P<origin>([a-z][a-z0-9+\-.]*)://([a-z0-9\-._~%]+|\[[a-z0-9\-._~%!$&'()*+,;=:]+\]):?([0-9]+)?)\)`, // ($SCHEME://$DOMAIN:$PORT)
+			`\.\(ttl:[0-9.]+\)`, // (ttl:$TTL)
+		}, ""))
 )
 
 func findLabelValue(name string, keys, values []string) string {
@@ -229,7 +240,7 @@ func cleanBackendName(name string) string {
 	if strings.HasPrefix(name, "reload_") {
 		dot := strings.Index(name, ".")
 		if dot != -1 {
-			name = name[dot + 1:]
+			name = name[dot+1:]
 		}
 	}
 
@@ -269,6 +280,14 @@ func computePrometheusInfo(vName, vGroup, vIdentifier, vDescription string) (nam
 				if hits := regexBackendUUID.FindAllStringSubmatch(vIdentifier, -1); len(hits) > 0 && len(hits[0]) >= 3 {
 					labelKeys, labelValues = append(labelKeys, "backend"), append(labelValues, cleanBackendName(hits[0][2]))
 					labelKeys, labelValues = append(labelKeys, "server"), append(labelValues, hits[0][1])
+				} else if hits := regexBackendGOTO.FindStringSubmatch(vIdentifier); len(hits) >= 4 {
+					labelKeys, labelValues = append(labelKeys, "backend"), append(labelValues, cleanBackendName(hits[regexBackendGOTO.SubexpIndex("origin")]))
+					labelKeys, labelValues = append(labelKeys, "server"), append(labelValues, hits[regexBackendGOTO.SubexpIndex("ip")])
+					// The `goto` label is added to ensures uniqueness in the
+					// case a new backend is created with the same definition
+					// as an old one, with both coexisting in varnishstat for a
+					// short time (e.g. when a `vcl.reload` command is issued).
+					labelKeys, labelValues = append(labelKeys, "goto"), append(labelValues, hits[regexBackendGOTO.SubexpIndex("serial")])
 				} else if hits := regexBackendParen.FindAllStringSubmatch(vIdentifier, -1); len(hits) > 0 && len(hits[0]) >= 3 {
 					labelKeys, labelValues = append(labelKeys, "backend"), append(labelValues, cleanBackendName(hits[0][1]))
 					labelKeys, labelValues = append(labelKeys, "server"), append(labelValues, strings.Replace(hits[0][2], ",,", ":", 1))
